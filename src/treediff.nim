@@ -10,8 +10,16 @@ import algorithm, asyncdispatch, asyncfile, md5, mersenne, math, os, re,
 
 const path_sep = "/"
 
+type
+  FloatVec = seq[float]
+  FileInfoBundle = (string, seq[string])
+  FileInfoBundleTable = TableRef[string, seq[string]]
+  FileInfoBundleSet = HashSet[FileInfoBundle]
+  FileInfoTree = TableRef[string, (HashSet[string], seq[(string, string)])]
+
+
 ### Pseudo-module-boundary: ingestion section
-proc readHashes(filename: string) : Future[TableRef[string, seq[string]]]
+proc readHashes(filename: string) : Future[FileInfoBundleTable]
      {.async.} =
   # Not truly asynchronous.
   let file = openAsync(filename)
@@ -38,10 +46,8 @@ proc readHashes(filename: string) : Future[TableRef[string, seq[string]]]
 
   return hashes
 
-# FIXME typedef this, and a few other more complicated types
 proc getFilteredHashes(filename1: string, filename2: string):
-                      (HashSet[(string, seq[string])],
-                       HashSet[(string, seq[string])]) =
+                      (FileInfoBundleSet, FileInfoBundleSet) =
   let pairs_h0 = toSet(toSeq(pairs(waitFor readHashes(filename1))))
   let pairs_h1 = toSet(toSeq(pairs(waitFor readHashes(filename2))))
   let pairs_common = pairs_h0 * pairs_h1
@@ -53,9 +59,7 @@ proc getFilteredHashes(filename1: string, filename2: string):
 
 ## createHashPath and createHashDirTree modify same data structures;
 ## for refactoring purposes, they're coupled.
-proc createHashPath(dirtree: TableRef[string, (HashSet[string],
-                                               seq[(string, string)])],
-                    hash: string, path_prefix: string,
+proc createHashPath(dirtree: FileInfoTree, hash: string, path_prefix: string,
                     path_elements: seq[string]): void =
   if len(path_elements) == 0:
     return
@@ -71,19 +75,15 @@ proc createHashPath(dirtree: TableRef[string, (HashSet[string],
       dirTree[nextPath] = (toSet[string]([]), @[])
     createHashPath(dirtree, hash, nextPath, path_elements[1..^1])
 
-proc sortHashTreeFiles(dirtree: TableRef[string,
-                                         (HashSet[string],
-                                          seq[(string, string)])]):
+proc sortHashTreeFiles(dirtree: FileInfoTree):
                       Future[void] {.async} =
   # This is why to put hash (or other similar properties) first in file-tuple.
   # It guarantees a useful sort order.
   for paths in keys(dirtree):
     dirtree[paths][1] = sorted(dirtree[paths][1], system.cmp)
 
-proc createHashDirTree(hashes: HashSet[(string, seq[string])]):
-                      Future[TableRef[string, 
-                                      (HashSet[string],
-                                       seq[(string, string)])]] {.async.} =
+proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
+                      {.async.} =
   # Preprocessing for pq-gram creation, to enable depth-first
   # searching. Use tables rather than real tree structure, as
   # that more easily enables gradual construction without the
@@ -133,7 +133,7 @@ proc isClose(a: float, b: float): bool =
   const atol = 1e-08
   return abs(a - b) <= (atol + rtol * abs(b))
 
-proc genUnitSphereCoord(seed: uint32): seq[float] =
+proc genUnitSphereCoord(seed: uint32): FloatVec =
   var mt = newMersenneTwister(seed)
 
   # RWS-Diff authors suggest $10 <= d <= 20$.
@@ -155,14 +155,14 @@ proc genUnitSphereCoord(seed: uint32): seq[float] =
 
   return rect_coords
 
-proc add_vectors(a: seq[float], b: seq[float]): seq[float] =
+proc add_vectors(a: FloatVec, b: FloatVec): FloatVec =
   doAssert len(a) == len(b)
   var sum = newSeq[float](len(a))
   for i in toSeq(0..len(a)-1):
     sum[i] = a[i] + b[i]
   return sum
 
-proc distsq_vectors(a: seq[float], b: seq[float]): float =
+proc distsq_vectors(a: FloatVec, b: FloatVec): float =
   doAssert len(a) == len(b)
   var sum = 0.0
   for i in toSeq(0..len(a)-1):
@@ -170,13 +170,14 @@ proc distsq_vectors(a: seq[float], b: seq[float]): float =
     sum += diff*diff
   return sum
 
+# TODO: add more test cases, for this and other math routines
 doAssert add_vectors(@[1.0,2,3],@[4.0,6,8]) == @[5.0, 8.0, 11.0]
 
-proc dot_product(x: seq[float], y: seq[float]): float =
+proc dot_product(x: FloatVec, y: FloatVec): float =
   doAssert len(x) == len(y)
   let retval = foldl(zip(x, y), a + b[0]*b[1], 0.0)
 
-proc cosine_similarity(x: seq[float], y: seq[float]): float =
+proc cosine_similarity(x: FloatVec, y: FloatVec): float =
   # Prefer unit vectors.
   # FIXME: this is ... not good ... numerics.
   let norm_x = sqrt(dot_product(x, x))
@@ -184,13 +185,12 @@ proc cosine_similarity(x: seq[float], y: seq[float]): float =
   if isClose(norm_x, 0) or isClose(norm_y, 0):
     return 0.0
   let retval = foldl(zip(x, y), a + b[0]*b[1]/(norm_x*norm_y), 0.0)
+  # TODO: assert in [-1, 1] since unit vecs
   return retval
 
 ### Pseudo-module-boundary: RWS-Diff specific pq-grams
-proc pqgramDfs(dirtree: TableRef[string, (HashSet[string],
-                                          seq[(string, string)])],
-               q: int, ancestors: seq[string], prefix: string):
-               (seq[float], HashSet[(string, seq[float])]) =
+proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
+               prefix: string): (FloatVec, HashSet[(string, FloatVec)]) =
   # Slide over hash-sorted files at this node, $q$ at a time.
   let (dirs, files) = dirtree[prefix]
   let num_files = len(files)
@@ -199,12 +199,11 @@ proc pqgramDfs(dirtree: TableRef[string, (HashSet[string],
                                               ("dummy", path_sep)))
 
   let pqgrams = map(toSeq(0..num_files + padding_len - q),
-                    proc(idx: int): seq[float] =
+                    proc(idx: int): FloatVec =
                       let window = padded_files[idx..idx+q-1]
                       doAssert len(window) == q
 
-                      # For $d$-dimensional sphere for RWD. Use hashes only.
-                      # TODO: ... pick up renames elsewhere.
+                      # TODO: pick up renames elsewhere.
                       let pqgram_hash = foldl(toMD5(foldl(ancestors, a & b) &
                                                     foldl(window, a & b[0],
                                                           ""))[0..3],
@@ -214,7 +213,7 @@ proc pqgramDfs(dirtree: TableRef[string, (HashSet[string],
 
   # FIXME: Ugly kludge. Shouldn't specify dimensions except in one place.
   var sums = foldl(pqgrams, add_vectors(a, b), newSeqWith(31, 0.0))
-  var allSubTrees = initSet[(string, seq[float])]()
+  var allSubTrees = initSet[(string, FloatVec)]()
 
   for nextDir in dirs:
     let (dir, rest) = pqgramDfs(dirtree, q,
@@ -228,8 +227,8 @@ proc pqgramDfs(dirtree: TableRef[string, (HashSet[string],
   incl(allSubTrees, (prefix, sums))
   return (sums, allSubTrees)
 
-proc createPQGrams(hashes: HashSet[(string, seq[string])], p: int = 2,
-                   q: int = 2) : Future[HashSet[(string, seq[float])]] {.async.} =
+proc createPQGrams(hashes: FileInfoBundleSet, p: int = 2,
+                   q: int = 2) : Future[HashSet[(string, FloatVec)]] {.async.} =
   # RWS-Diff matches overlapping ancestor/children so thus facilitate
   # finding such pairs directly. This involves a few new assumptions,
   # such as paths having '/'-delineated structure and the distinction
@@ -243,7 +242,7 @@ proc createPQGrams(hashes: HashSet[(string, seq[string])], p: int = 2,
   # The number of adjacent children/leaves (files) per pq-gram
   doAssert q > 1
 
-  # Initialize with $p$ dummy ancestors; path_sep harmless and can collapse later
+  # Initialize with $p$ dummy ancestors; path_sep harmless and can collapse
   # And then, starting from notional root path_sep, DFS through the tree.
   let (_, allSubTrees) = pqgramDfs(await createHashDirTree(hashes), q,
                                    newSeqWith(p, path_sep), path_sep)
@@ -256,7 +255,7 @@ proc calcDirWalks() : void =
   discard
 
 ### Pseudo-module-boundary: overall driver
-proc main(): Future[void] {.async.}=
+proc main(): Future[void] {.async.} =
   doAssert paramCount() >= 2
   let (hashes0_filtered, hashes1_filtered) = getFilteredHashes(paramStr(1),
                                                                paramStr(2))
