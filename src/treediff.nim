@@ -5,8 +5,8 @@
 # conference on Information & Knowledge Management. ACM, 2013.
 # https://db.in.tum.de/~finis/papers/RWS-Diff.pdf
 
-import algorithm, asyncdispatch, asyncfile, md5, mersenne, math, re, sequtils,
-       sets, strutils, tables, math
+import algorithm, asyncdispatch, asyncfile, md5, mersenne, math, os, re,
+       sequtils, sets, strutils, tables
 
 const path_sep = "/"
 
@@ -205,7 +205,6 @@ proc pqgramDfs(dirtree: TableRef[string, (HashSet[string],
 
                       # For $d$-dimensional sphere for RWD. Use hashes only.
                       # TODO: ... pick up renames elsewhere.
-                      # MD5 is what Nim's standard library has, and it's adequate for this.
                       let pqgram_hash = foldl(toMD5(foldl(ancestors, a & b) &
                                                     foldl(window, a & b[0],
                                                           ""))[0..3],
@@ -257,10 +256,10 @@ proc calcDirWalks() : void =
   discard
 
 ### Pseudo-module-boundary: overall driver
-# TODO: read cmdline args
 proc main(): Future[void] {.async.}=
-  let (hashes0_filtered, hashes1_filtered) = getFilteredHashes("/home/user/test.sha256",
-                                                               "/home/user/test2.sha256")
+  doAssert paramCount() >= 2
+  let (hashes0_filtered, hashes1_filtered) = getFilteredHashes(paramStr(1),
+                                                               paramStr(2))
   let subtrees1 = await createPQGrams(hashes0_filtered)
   let subtrees2 = await createPQGrams(hashes1_filtered)
 
