@@ -8,7 +8,7 @@
 import algorithm, asyncdispatch, asyncfile, md5, mersenne, math, os, re,
        sequtils, sets, strutils, tables
 
-const path_sep = "/"
+const pathSep = "/"
 
 type
   FloatVec = seq[float]
@@ -26,7 +26,7 @@ proc readHashes(filename: string) : Future[FileInfoBundleTable]
   let data = await readAll(file)
   close(file)
 
-  let split_lines = filter(map(split(data, "\n"), splitWhitespace),
+  let splitLines = filter(map(split(data, "\n"), splitWhitespace),
                            proc(sl: seq[string]): bool = len(sl) == 2)
 
   # Start by filtering out identical paths, in common case
@@ -35,45 +35,43 @@ proc readHashes(filename: string) : Future[FileInfoBundleTable]
   # have multiple paths having duplicate hashes especially
   # across the two datasets being compared. Thus, keep all
   # paths with a given hash together.
-  let hashes = newTable[string, seq[string]]()
-  for hash_path in split_lines:
-    let hash = hash_path[0]
-    let path = @[hash_path[1]]
-    if hasKey(hashes, hash):
-      insert(hashes[hash], path)
+  result = newTable[string, seq[string]]()
+  for hashPath in splitLines:
+    let hash = hashPath[0]
+    let path = @[hashPath[1]]
+    if hasKey(result, hash):
+      insert(result[hash], path)
     else:
-      hashes[hash] = path
-
-  return hashes
+      result[hash] = path
 
 proc getFilteredHashes(filename1: string, filename2: string):
                       (FileInfoBundleSet, FileInfoBundleSet) =
-  let pairs_h0 = toSet(toSeq(pairs(waitFor readHashes(filename1))))
-  let pairs_h1 = toSet(toSeq(pairs(waitFor readHashes(filename2))))
-  let pairs_common = pairs_h0 * pairs_h1
+  let pairsH0 = toSet(toSeq(pairs(waitFor readHashes(filename1))))
+  let pairsH1 = toSet(toSeq(pairs(waitFor readHashes(filename2))))
+  let pairsCommon = pairsH0 * pairsH1
 
   # Ignore unchanged portions. Many tree diff algorithms are O(n^2)
   # or worse, so keep simple case quick, and ease debugging, with a
   # pair of large trees with relatively few differences.
-  return (pairs_h0 - pairs_common, pairs_h1 - pairs_common)
+  result = (pairsH0 - pairsCommon, pairsH1 - pairsCommon)
 
 ## createHashPath and createHashDirTree modify same data structures;
 ## for refactoring purposes, they're coupled.
-proc createHashPath(dirtree: FileInfoTree, hash: string, path_prefix: string,
-                    path_elements: seq[string]): void =
-  if len(path_elements) == 0:
-    return
-  elif len(path_elements) == 1:
+proc createHashPath(dirtree: FileInfoTree, hash: string, pathPrefix: string,
+                    pathElements: seq[string]): void =
+  if len(pathElements) == 0:
+    discard
+  elif len(pathElements) == 1:
     # Leaf node, file.
-    insert(dirtree[path_prefix][1], (hash, path_elements[0]))
+    insert(dirtree[pathPrefix][1], (hash, pathElements[0]))
   else:
-    doAssert len(path_elements) >= 2
+    doAssert len(pathElements) >= 2
     # Directory. Create if necessary, based on thus far built-up path.
-    incl(dirTree[path_prefix][0], path_elements[0])
-    let nextPath = path_prefix & path_elements[0] & path_sep
+    incl(dirTree[pathPrefix][0], pathElements[0])
+    let nextPath = pathPrefix & pathElements[0] & pathSep
     if not hasKey(dirtree, nextPath):
       dirTree[nextPath] = (toSet[string]([]), @[])
-    createHashPath(dirtree, hash, nextPath, path_elements[1..^1])
+    createHashPath(dirtree, hash, nextPath, pathElements[1..^1])
 
 proc sortHashTreeFiles(dirtree: FileInfoTree):
                       Future[void] {.async} =
@@ -96,12 +94,11 @@ proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
   # files point to their hash values, also strings. Tuples, with
   # only structural type matching, seem borderline, whether they
   # be labeled by field. pq-grams treat each distinctly.
-  # FIXME: use distinct types for this.
-  let dirtree = newTable[string, (HashSet[string], seq[(string, string)])]()
-  dirtree[path_sep] = (toSet[string]([]), @[])
+  result = newTable[string, (HashSet[string], seq[(string, string)])]()
+  result[pathSep] = (toSet[string]([]), @[])
 
-  for hash_paths in items(hashes):
-    let (hash, paths) = hash_paths
+  for hashPaths in items(hashes):
+    let (hash, paths) = hashPaths
     # For each path, construct or add to relevant table on demand,
     # to allow arbitrary input order of paths.
     for path in paths:
@@ -112,28 +109,27 @@ proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
       # Perhaps should allow '\' as well, but this is the only separator
       # which applies, across all modern, common OSes, and is guaranteed
       # to be a reserved element (including Windows).
-      let path_elements = filter(split(replace(path, "^/+", ""), path_sep),
+      let pathElements = filter(split(replace(path, "^/+", ""), pathSep),
                                  proc(s: string) : bool = len(s) > 1)
 
-      createHashPath(dirtree, hash, path_sep, path_elements)
+      createHashPath(result, hash, pathSep, pathElements)
 
   # Sort file but not directory entries; this removes spurious differences in
   # pq-grams, which matters increasingly with larger $q$.
-  await sortHashTreeFiles(dirtree)
-  return dirtree
+  await sortHashTreeFiles(result)
 
 
 ### Pseudo-module-boundary: math section
 proc getMersenneFloat(m: var MersenneTwister): float =
-  return float(getNum(m))/float(high(uint32))*TAU
+  result = float(getNum(m))/float(high(uint32))*TAU
 
 proc isClose(a: float, b: float): bool =
   # https://docs.scipy.org/doc/numpy/reference/generated/numpy.isclose.html
   const rtol = 1e-05
   const atol = 1e-08
-  return abs(a - b) <= (atol + rtol * abs(b))
+  result = abs(a - b) <= (atol + rtol * abs(b))
 
-proc genUnitSphereCoord(seed: uint32): FloatVec =
+proc genUnitSpherePoint(seed: uint32): FloatVec =
   var mt = newMersenneTwister(seed)
 
   # RWS-Diff authors suggest $10 <= d <= 20$.
@@ -142,93 +138,97 @@ proc genUnitSphereCoord(seed: uint32): FloatVec =
   let angles = newSeqWith(dims, getMersenneFloat(mt))
 
   # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates
-  let first_rect_coord = cos(angles[0])
+  let firstRectCoord = cos(angles[0])
   let middle = map(toSeq(0..len(angles)-2),
                    proc(idx: int) : float =
-                     return foldl(angles[0..idx],
-                                  a * sin(b), 1.0) * cos(angles[idx+1]))
-  let last_rect_coord = foldl(angles, a*sin(b), 1.0)
-  let rect_coords = concat(@[first_rect_coord], middle, @[last_rect_coord])
+                     result = foldl(angles[0..idx],
+                                    a * sin(b), 1.0) * cos(angles[idx+1]))
+  let lastRectCoord = foldl(angles, a*sin(b), 1.0)
+  result = concat(@[firstRectCoord], middle, @[lastRectCoord])
 
   # Is this point actually on the unit $n$-sphere?
-  doAssert isClose(foldl(rect_coords, a + b*b, 0.0), 1.0)
+  doAssert isClose(foldl(result, a + b*b, 0.0), 1.0)
 
-  return rect_coords
-
-proc add_vectors(a: FloatVec, b: FloatVec): FloatVec =
+proc addVectors(a: FloatVec, b: FloatVec): FloatVec =
   doAssert len(a) == len(b)
-  var sum = newSeq[float](len(a))
+  result = newSeq[float](len(a))
   for i in toSeq(0..len(a)-1):
-    sum[i] = a[i] + b[i]
-  return sum
+    result[i] = a[i] + b[i]
 
-proc distsq_vectors(a: FloatVec, b: FloatVec): float =
+proc distSqVectors(a: FloatVec, b: FloatVec): float =
   doAssert len(a) == len(b)
-  var sum = 0.0
+  result = 0.0
   for i in toSeq(0..len(a)-1):
     let diff = a[i] - b[i]
-    sum += diff*diff
-  return sum
+    result += diff*diff
 
 # TODO: add more test cases, for this and other math routines
-doAssert add_vectors(@[1.0,2,3],@[4.0,6,8]) == @[5.0, 8.0, 11.0]
+doAssert addVectors(@[1.0,2,3],@[4.0,6,8]) == @[5.0, 8.0, 11.0]
 
-proc dot_product(x: FloatVec, y: FloatVec): float =
+proc dotProduct(x: FloatVec, y: FloatVec): float =
   doAssert len(x) == len(y)
   let retval = foldl(zip(x, y), a + b[0]*b[1], 0.0)
 
-proc cosine_similarity(x: FloatVec, y: FloatVec): float =
+proc cosineSimilarity(x: FloatVec, y: FloatVec): float =
   # Prefer unit vectors.
   # FIXME: this is ... not good ... numerics.
-  let norm_x = sqrt(dot_product(x, x))
-  let norm_y = sqrt(dot_product(y, y))
-  if isClose(norm_x, 0) or isClose(norm_y, 0):
-    return 0.0
-  let retval = foldl(zip(x, y), a + b[0]*b[1]/(norm_x*norm_y), 0.0)
+  let normX = sqrt(dotProduct(x, x))
+  let normY = sqrt(dotProduct(y, y))
+  if isClose(normX, 0) or isClose(normY, 0):
+    result = 0.0
+  else:
+    result = foldl(zip(x, y), a + b[0]*b[1]/(normX*normY), 0.0)
   # TODO: assert in [-1, 1] since unit vecs
-  return retval
 
 ### Pseudo-module-boundary: RWS-Diff specific pq-grams
 proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
                prefix: string): (FloatVec, HashSet[(string, FloatVec)]) =
   # Slide over hash-sorted files at this node, $q$ at a time.
   let (dirs, files) = dirtree[prefix]
-  let num_files = len(files)
-  let padding_len = max(q - num_files, 0)
-  let padded_files = concat(files, newSeqWith(padding_len,
-                                              ("dummy", path_sep)))
+  let numFiles = len(files)
+  let paddingLen = max(q - numFiles, 0)
+  let paddedFiles = concat(files, newSeqWith(paddingLen,
+                                              ("dummy", pathSep)))
 
-  let pqgrams = map(toSeq(0..num_files + padding_len - q),
+  let pqgrams = map(toSeq(0..numFiles + paddingLen - q),
                     proc(idx: int): FloatVec =
-                      let window = padded_files[idx..idx+q-1]
+                      let window = paddedFiles[idx..idx+q-1]
                       doAssert len(window) == q
 
                       # TODO: pick up renames elsewhere.
-                      let pqgram_hash = foldl(toMD5(foldl(ancestors, a & b) &
+                      let pqgramHash = foldl(toMD5(foldl(ancestors, a & b) &
                                                     foldl(window, a & b[0],
                                                           ""))[0..3],
                                               a*256+b, 0'u32)
-                      #echo ancestors, " ", window, " ", pqgram_hash
-                      return genUnitSphereCoord(pqgram_hash))
+                      #echo ancestors, " ", window, " ", pqgramHash
+                      result = genUnitSpherePoint(pqgramHash))
 
   # FIXME: Ugly kludge. Shouldn't specify dimensions except in one place.
-  var sums = foldl(pqgrams, add_vectors(a, b), newSeqWith(31, 0.0))
+  var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(31, 0.0))
   var allSubTrees = initSet[(string, FloatVec)]()
+
+  let foo = map(dirs,
+                #proc(nextDir: string): (FloatVec, HashSet[(string, FloatVec)]) =
+                proc(nextDir: string): FloatVec =
+                  result = pqgramDfs(dirtree, q,
+                                     concat(ancestors[1..^1], @[nextDir]),
+                                     #prefix & nextDir & pathSep))
+                                     prefix & nextDir & pathSep)[0])
 
   for nextDir in dirs:
     let (dir, rest) = pqgramDfs(dirtree, q,
                                 concat(ancestors[1..^1], @[nextDir]),
-                                prefix & nextDir & path_sep)
+                                prefix & nextDir & pathSep)
 
     # Record each subtree's information both separately and merged.
     # Track roots of children separately to avoid multiply counting.
-    sums = add_vectors(sums, dir)
+    sums = addVectors(sums, dir)
     incl(allSubTrees, rest)
   incl(allSubTrees, (prefix, sums))
-  return (sums, allSubTrees)
+  result = (sums, allSubTrees)
 
 proc createPQGrams(hashes: FileInfoBundleSet, p: int = 2,
-                   q: int = 2) : Future[HashSet[(string, FloatVec)]] {.async.} =
+                   q: int = 3) : Future[HashSet[(string, FloatVec)]] {.async.} =
   # RWS-Diff matches overlapping ancestor/children so thus facilitate
   # finding such pairs directly. This involves a few new assumptions,
   # such as paths having '/'-delineated structure and the distinction
@@ -242,30 +242,29 @@ proc createPQGrams(hashes: FileInfoBundleSet, p: int = 2,
   # The number of adjacent children/leaves (files) per pq-gram
   doAssert q > 1
 
-  # Initialize with $p$ dummy ancestors; path_sep harmless and can collapse
-  # And then, starting from notional root path_sep, DFS through the tree.
+  # Initialize with $p$ dummy ancestors; pathSep harmless and can collapse
+  # And then, starting from notional root pathSep, DFS through the tree.
   let (_, allSubTrees) = pqgramDfs(await createHashDirTree(hashes), q,
-                                   newSeqWith(p, path_sep), path_sep)
+                                   newSeqWith(p, pathSep), pathSep)
 
-  return allSubTrees
+  result = allSubTrees
 
-proc calcDirWalks() : void =
-  # in particular -- choose best of $l$ NNs (fixed $l$i). based on L_2 metric.
-  # okay for now just use literal hash (numeric function thereof). obv date soon
+proc generateEditScript() : void =
   discard
+
 
 ### Pseudo-module-boundary: overall driver
 proc main(): Future[void] {.async.} =
   doAssert paramCount() >= 2
-  let (hashes0_filtered, hashes1_filtered) = getFilteredHashes(paramStr(1),
+  let (hashes0Filtered, hashes1Filtered) = getFilteredHashes(paramStr(1),
                                                                paramStr(2))
-  let subtrees1 = await createPQGrams(hashes0_filtered)
-  let subtrees2 = await createPQGrams(hashes1_filtered)
+  let subtrees1 = await createPQGrams(hashes0Filtered)
+  let subtrees2 = await createPQGrams(hashes1Filtered)
 
   for item in items(subtrees1):
     for item2 in items(subtrees2):
-      #let cs = cosine_similarity(item[1], item2[1])
-      let cs = distsq_vectors(item[1], item2[1])
+      #let cs = cosineSimilarity(item[1], item2[1])
+      let cs = distSqVectors(item[1], item2[1])
       if cs > 2:
         continue
       echo item[0], " ", item2[0], " ", cs
