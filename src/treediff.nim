@@ -16,13 +16,13 @@ type
   FileInfoBundleTable = TableRef[string, seq[string]]
   FileInfoBundleSet = HashSet[FileInfoBundle]
   FileInfoTree = TableRef[string, (HashSet[string], seq[(string, string)])]
-  PQGramMap = HashSet[(string, FloatVec)]
+  PQGramMap = HashSet[(string, FloatVec, int)]
 
 
 # FIXME: templatize more
 
 ### Pseudo-module-boundary: ingestion section
-proc readHashes(filename: string) : Future[FileInfoBundleTable]
+proc readHashes(filename: string): Future[FileInfoBundleTable]
      {.async.} =
   # Not truly asynchronous.
   let file = openAsync(filename)
@@ -112,7 +112,7 @@ proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
       # which applies, across all modern, common OSes, and is guaranteed
       # to be a reserved element (including Windows).
       let pathElements = filter(split(replace(path, "^/+", ""), pathSep),
-                                 proc(s: string) : bool = len(s) > 1)
+                                 proc(s: string): bool = len(s) > 1)
 
       createHashPath(result, hash, pathSep, pathElements)
 
@@ -135,14 +135,14 @@ proc genUnitSpherePoint(seed: uint32): FloatVec =
   var mt = newMersenneTwister(seed)
 
   # RWS-Diff authors suggest $10 <= d <= 20$.
-  const dims = 50
+  const dims = 40
 
   let angles = newSeqWith(dims, getMersenneFloat(mt))
 
   # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates
   let firstRectCoord = cos(angles[0])
   let middle = map(toSeq(0..len(angles)-2),
-                   proc(idx: int) : float =
+                   proc(idx: int): float =
                      result = foldl(angles[0..idx],
                                     a * sin(b), 1.0) * cos(angles[idx+1]))
   let lastRectCoord = foldl(angles, a*sin(b), 1.0)
@@ -193,8 +193,8 @@ proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
                       result = genUnitSpherePoint(pqgramHash))
 
   # FIXME: Shouldn't specify dimensions except in one place.
-  var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(51, 0.0))
-  var allSubTrees = initSet[(string, FloatVec)]()
+  var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(41, 0.0))
+  var allSubTrees = initSet[(string, FloatVec, int)]()
 
   let foo = map(dirs,
                 #proc(nextDir: string): (FloatVec, PQGramMap) =
@@ -217,20 +217,22 @@ proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
   # Special-case simple per-file calculations.
   # Correct way per "The pq-gram Distance between Ordered Labeled Trees" is
   # to have $q$ notional children of leaves of original tree, but since the
-  # pqgram-hashing, etc is opaque and one-dimensional, it is unnecessary to
+  # pqgram-hashing, etc is opaque and one-directional, it is unnecessary to
   # actually build out this notional tree. It just has to have distinct pq-
   # grams from the directories and be included hierarchically in the bags.
   for file in files:
     let (fileHash, fileName) = file
     incl(allSubTrees, (prefix & fileName,
                        genUnitSpherePoint(foldl(toMD5(fileHash)[0..3],
-                                                a*256+b, 0'u32))))
+                                                a*256+b, 0'u32)),
+                       1))
 
-  incl(allSubTrees, (prefix, sums))
+  incl(allSubTrees, (prefix, sums, len(allSubtrees)))
+
   result = (sums, allSubTrees)
 
 proc createPQGrams(hashes: FileInfoBundleSet, p: int = 1,
-                   q: int = 3) : Future[PQGramMap] {.async.} =
+                   q: int = 3): Future[PQGramMap] {.async.} =
   # RWS-Diff matches overlapping ancestor/children so thus facilitate
   # finding such pairs directly. This involves a few new assumptions,
   # such as paths having '/'-delineated structure and the distinction
@@ -269,8 +271,8 @@ proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
     # By setting up this way, cmp compares with correct precedence.
     # TODO: pull out isDirectory as utility function.
     let dists = sorted(map(initialSubtrees,
-                           proc(initialSubtree: tuple[a: string, b: FloatVec]) :
-                               tuple[a: int, b: float, c: int, d: string] =
+                           proc(initialSubtree: tuple[a: string, b: FloatVec, c: int]):
+                                tuple[a: int, b: float, c: int, d: string, e: int] =
                              # TODO: for all these -- can just return expression?
                              result = (abs(int(endsWith(goalSubtree[0],
                                                         pathSep)) -
@@ -280,12 +282,15 @@ proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
                                                      initialSubtree[1]),
                                        editDistance(initialSubtree[0],
                                                     goalSubtree[0]),
-                                       initialSubtree[0])),
+                                       initialSubtree[0],
+                                       initialSubtree[2])),
                        cmp)[0]
 
     # Files must match exactly, while directories can match approximately.
+    # Scale allowed distance with potential distance.
     if ((not goalSubTree[0].endswith(pathSep) and isClose(dists[1], 0.0)) or
-        (goalSubTree[0].endswith(pathSep) and dists[1] < 5.0)):
+        (goalSubTree[0].endswith(pathSep) and
+         float(dists[1])/(float(dists[4]+goalSubtree[2])) < 0.2)):
       result[goalSubTree[0]] = dists[3]
 
 # FIXME: this is a general utility function and belongs elsewhere
@@ -294,24 +299,24 @@ proc reverseCmp[T](x, y: T): int =
 
 ## Substantial section
 # TODO: for testing, pair operations w/ actual tree-building and encapsulate
-proc generateInsertLeaf() : void =
+proc generateInsertLeaf(): void =
   discard
 
-proc generateCopy() : void =
+proc generateCopy(): void =
   discard
 
-proc generateMove() : void =
+proc generateMove(): void =
   discard
 
-proc generateRename() : void =
+proc generateRename(): void =
   discard
 
-proc generateDeleteLeaf() : void =
+proc generateDeleteLeaf(): void =
   discard
 
 # TODO: extract extract-n'th-element
 proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
-                        pqgramMap: TableRef[string, string]) : void =
+                        pqgramMap: TableRef[string, string]): void =
   # Pre-order traversal to check parents before children,
   # but true pre-order depth-first search isn't necessary.
   # echo pqgramMap
@@ -319,12 +324,13 @@ proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
   var usedPrefixes = initSet[string]()
 
   for goalSubtree in sorted(map(toSeq(items(goalState)),
-                                proc(x: tuple[a: string, b: FloatVec]):
+                                proc(x: tuple[a: string, b: FloatVec, c: int]):
                                      string = x[0]),
                             cmp):
     if goalSubtree notin pqgramMap:
         let destParent = "parent(\"" & goalSubtree & "\")"
         echo "insertLeaf(\"", goalSubtree, "\", ", destParent, ")"
+        # update mapping initialState
     else:
       let initSubtree = pqGramMap[goalSubtree]
       # for m(parent), rpartition
@@ -332,13 +338,10 @@ proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
       # Check if already used subtree; if so, must copy rather than move
       if initSubTree == goalSubTree and allIt(usedPrefixes, not startsWith(goalSubtree, it)):
         echo "copy(\"", initSubTree, "\", M(parent(\"", goalSubtree, "\")"
+        # update mapping initialState
       # FIXME: check parents
       elif initSubTree != goalSubTree:
-        echo "move(\"", initSubTree, "\", M(parent(\"", goalSubtree, "\")"
-
-      # And this checks last segment (but if endswith "/", remove first)
-      if initSubTree != goalSubTree:
-        echo "rename(\"", initSubTree, "\", label(\"", goalSubTree, "\")"
+        echo "mv(\"", initSubTree, "\", M(parent(\"", goalSubtree, "\")"
 
       incl(usedPrefixes, goalSubtree)
 
@@ -347,7 +350,7 @@ proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
   # depening on avoiding further data-structure coupling.
   let mappedInitSubtrees = toSet(toSeq(values(pqGramMap)))
   for initSubtree in sorted(map(toSeq(items(initialState)),
-                                proc(x: tuple[a: string, b: FloatVec]) : string =
+                                proc(x: tuple[a: string, b: FloatVec, c: int]): string =
                                   result = x[0]),
                             reverseCmp):
     if initSubtree notin mappedInitSubtrees:
