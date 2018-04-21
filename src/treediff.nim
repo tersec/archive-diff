@@ -160,11 +160,12 @@ proc distSqVectors(a: auto, b: auto): auto =
 doAssert addVectors(@[1.0,2,3],@[4.0,6,8]) == @[5.0, 8.0, 11.0]
 
 proc whitenSeed(input: auto): auto =
+  # PRNG seeds are u32, and input distributions may be uneven.
   foldl(toMD5(input)[0..3], a*256+b, 0'u32)
 
 ### Pseudo-module-boundary: RWS-Diff specific pq-grams
 proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
-               prefix: auto): (FloatVec, PQGramMap) =
+               prefix: auto): (FloatVec, PQGramMap, PQGramMap) =
   # Slide over hash-sorted files at this node, $q$ at a time.
   let (dirs, files) = dirtree[prefix]
   let numFiles = len(files)
@@ -174,7 +175,7 @@ proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
 
   # FIXME: wrap around by $q-1$ siblings, and also use non-leaves in
   # pq-grams.
-  # While it calculates on a file basis, it's all for the directory.
+  # While it calculates on a file basis, it's for the directory.
   let pqgrams = map(toSeq(0..numFiles + paddingLen - q),
                     proc(idx: int): auto =
                       let window = paddedFiles[idx..idx+q-1]
@@ -186,7 +187,8 @@ proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
 
   # FIXME: Shouldn't specify dimensions except in one place.
   var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(31, 0.0))
-  var allSubTrees = initSet[(string, FloatVec, int)]()
+  var allSubDirs = initSet[(string, FloatVec, int)]()
+  var allSubFiles = initSet[(string, FloatVec, int)]()
 
   let foo = map(dirs,
                 proc(nextDir: string): auto =
@@ -196,14 +198,16 @@ proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
                             prefix & nextDir & pathSep)[0])
 
   for nextDir in dirs:
-    let (dir, rest) = pqgramDfs(dirtree, q,
-                                concat(ancestors[1 .. ^1], @[nextDir]),
-                                prefix & nextDir & pathSep)
+    let (dir, restDir, restFiles) = pqgramDfs(dirtree, q,
+                                              concat(ancestors[1 .. ^1],
+                                                     @[nextDir]),
+                                              prefix & nextDir & pathSep)
 
     # Record each subtree's information both separately and merged.
     # Track roots of children separately to avoid multiply counting.
     sums = addVectors(sums, dir)
-    incl(allSubTrees, rest)
+    incl(allSubDirs, restDir)
+    incl(allSubFiles, restFiles)
 
   # Special-case simple per-file calculations.
   # Correct way per "The pq-gram Distance between Ordered Labeled Trees" is
@@ -213,15 +217,15 @@ proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
   # grams from the directories and be included hierarchically in the bags.
   for file in files:
     let (fileHash, fileName) = file
-    incl(allSubTrees, (prefix & fileName,
+    incl(allSubFiles, (prefix & fileName,
                        genUnitSpherePoint(whitenSeed(fileHash)), 1))
 
-  incl(allSubTrees, (prefix, sums, len(allSubtrees)))
+  incl(allSubDirs, (prefix, sums, len(allSubDirs)))
 
-  result = (sums, allSubTrees)
+  result = (sums, allSubDirs, allSubFiles)
 
-proc createPQGrams(hashes: auto, p: auto = 1, q: auto = 3): Future[PQGramMap]
-                  {.async.} =
+proc createPQGrams(hashes: auto, p: auto = 1, q: auto = 3):
+                  Future[(PQGramMap, PQGramMap)] {.async.} =
   # RWS-Diff matches overlapping ancestor/children so thus facilitate
   # finding such pairs directly. This involves a few new assumptions,
   # such as paths having '/'-delineated structure and the distinction
@@ -236,10 +240,10 @@ proc createPQGrams(hashes: auto, p: auto = 1, q: auto = 3): Future[PQGramMap]
 
   # Initialize with $p$ dummy ancestors; pathSep harmless and can collapse
   # And then, starting from notional root pathSep, DFS through the tree.
-  let (_, allSubTrees) = pqgramDfs(await createHashDirTree(hashes), q,
+  let (_, dirs, files) = pqgramDfs(await createHashDirTree(hashes), q,
                                    newSeqWith(p, pathSep), pathSep)
 
-  result = allSubTrees
+  result = (dirs, files)
 
 proc isDirectory(path: auto): auto =
   endsWith(path, pathSep)
@@ -260,13 +264,10 @@ proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
   # directories with directories.
   result = newTable[string, string]()
   for goalSubtree in items(goalState):
-    # By setting up this way, cmp compares with correct precedence.
-    # TODO: switch dir/file matching to hard constraint; correctness & efficiency
+    # cmp compares with correct precedence.
     let dists = sorted(map(initSubtrees,
                            proc(initSubtree: auto): auto =
-                             (abs(int(isDirectory(goalSubtree[0])) -
-                                  int(isDirectory(initSubtree[0]))),
-                              distSqVectors(goalSubtree[1], initSubtree[1]),
+                             (distSqVectors(goalSubtree[1], initSubtree[1]),
                               editDistance(initSubtree[0], goalSubtree[0]),
                               initSubtree[0],
                               initSubtree[2])),
@@ -274,10 +275,11 @@ proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
 
     # Files must match exactly, while directories can match approximately.
     # Scale allowed distance with potential distance.
-    if (not isDirectory(goalSubTree[0]) and isClose(dists[1], 0.0)) or
+    doAssert isDirectory(goalSubTree[0]) == isDirectory(dists[2])
+    if (not isDirectory(goalSubTree[0]) and isClose(dists[0], 0.0)) or
        (isDirectory(goalSubTree[0]) and
-        float(dists[1])/(float(dists[4]+goalSubtree[2])) < 0.2):
-      result[goalSubTree[0]] = dists[3]
+        float(dists[0])/(float(dists[3]+goalSubtree[2])) < 0.2):
+      result[goalSubTree[0]] = dists[2]
 
 ## Substantial section
 # TODO: for testing, pair operations w/ actual tree-building and encapsulate
@@ -337,11 +339,18 @@ proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
 
 proc compareHashes(hashes0: auto, hashes1: auto): Future[void] {.async.} =
   let (hashes0Filtered, hashes1Filtered) = getFilteredHashes(hashes0, hashes1)
-  let initialState = await createPQGrams(hashes0Filtered)
-  let goalState = await createPQGrams(hashes1Filtered)
+  let (initialDirs, initialFiles) = await createPQGrams(hashes0Filtered)
+  let (goalDirs, goalFiles) = await createPQGrams(hashes1Filtered)
 
-  generateEditScript(initialState, goalState,
-                     mapDestPQGrams(initialState, goalState))
+  let dirMap = mapDestPQGrams(initialDirs, goalDirs)
+  let fileMap = mapDestPQGrams(initialFiles, goalFiles)
+  let merged = newTable(concat(toSeq(pairs(dirMap)), toSeq(pairs(fileMap))))
+  let initialState = toSet(concat(toSeq(items(initialDirs)),
+                                  toSeq(items(initialFiles))))
+  let goalState = toSet(concat(toSeq(items(goalDirs)),
+                               toSeq(items(goalFiles))))
+
+  generateEditScript(initialState, goalState, merged)
 
 
 ### Pseudo-module-boundary: overall driver
