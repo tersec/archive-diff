@@ -12,25 +12,20 @@ const pathSep = "/"
 
 type
   FloatVec = seq[float]
-  FileInfoBundle = (string, seq[string])
   FileInfoBundleTable = TableRef[string, seq[string]]
-  FileInfoBundleSet = HashSet[FileInfoBundle]
   FileInfoTree = TableRef[string, (HashSet[string], seq[(string, string)])]
   PQGramMap = HashSet[(string, FloatVec, int)]
 
 
-# FIXME: templatize more
-
-### Pseudo-module-boundary: ingestion section
-proc readHashes(filename: string): Future[FileInfoBundleTable]
-     {.async.} =
+### Pseudo-module-boundary: ingestion
+proc readHashes(filename: string): Future[FileInfoBundleTable] {.async.} =
   # Not truly asynchronous.
   let file = openAsync(filename)
   let data = await readAll(file)
   close(file)
 
   let splitLines = filter(map(split(data, "\n"), splitWhitespace),
-                           proc(sl: seq[string]): bool = len(sl) == 2)
+                           proc(sl: auto): auto = len(sl) == 2)
 
   # Start by filtering out identical paths, in common case
   # Allows for lower dimensionality for similar results in
@@ -47,20 +42,18 @@ proc readHashes(filename: string): Future[FileInfoBundleTable]
     else:
       result[hash] = path
 
-proc getFilteredHashes(filename1: string, filename2: string):
-                      (FileInfoBundleSet, FileInfoBundleSet) =
-  let pairsH0 = toSet(toSeq(pairs(waitFor readHashes(filename1))))
-  let pairsH1 = toSet(toSeq(pairs(waitFor readHashes(filename2))))
+proc getFilteredHashes(hashes0: auto, hashes1: auto): auto =
+  let pairsH0 = toSet(toSeq(pairs(hashes0)))
+  let pairsH1 = toSet(toSeq(pairs(hashes1)))
   let pairsCommon = pairsH0 * pairsH1
 
   # Ignore unchanged portions. Many tree diff algorithms are O(n^2)
-  # or worse, so keep simple case quick, and ease debugging, with a
-  # pair of large trees with relatively few differences.
+  # or worse, so keep pairs of large trees with few changes fast.
   result = (pairsH0 - pairsCommon, pairsH1 - pairsCommon)
 
 ## createHashPath and createHashDirTree modify same data structures;
 ## for refactoring purposes, they're coupled.
-proc createHashPath(dirtree: FileInfoTree, hash: string, pathPrefix: string,
+proc createHashPath(dirtree: auto, hash: auto, pathPrefix: auto,
                     pathElements: seq[string]): void =
   if len(pathElements) == 0:
     discard
@@ -74,16 +67,15 @@ proc createHashPath(dirtree: FileInfoTree, hash: string, pathPrefix: string,
     let nextPath = pathPrefix & pathElements[0] & pathSep
     if not hasKey(dirtree, nextPath):
       dirTree[nextPath] = (toSet[string]([]), @[])
-    createHashPath(dirtree, hash, nextPath, pathElements[1..^1])
+    createHashPath(dirtree, hash, nextPath, pathElements[1 .. ^1])
 
-proc sortHashTreeFiles(dirtree: FileInfoTree): Future[void] {.async} =
+proc sortHashTreeFiles(dirtree: auto): Future[void] {.async} =
   # This is why to put hash (or other similar properties) first in file-tuple.
   # It guarantees a useful sort order.
   for paths in keys(dirtree):
     dirtree[paths][1] = sorted(dirtree[paths][1], cmp)
 
-proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
-                      {.async.} =
+proc createHashDirTree(hashes: auto): Future[FileInfoTree] {.async.} =
   # Preprocessing for pq-gram creation, to enable depth-first
   # searching. Use tables rather than real tree structure, as
   # that more easily enables gradual construction without the
@@ -112,7 +104,7 @@ proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
       # which applies, across all modern, common OSes, and is guaranteed
       # to be a reserved element (including Windows).
       let pathElements = filter(split(replace(path, "^/+", ""), pathSep),
-                                 proc(s: string): bool = len(s) > 1)
+                                 proc(s: string): auto = len(s) > 1)
 
       createHashPath(result, hash, pathSep, pathElements)
 
@@ -121,43 +113,43 @@ proc createHashDirTree(hashes: FileInfoBundleSet): Future[FileInfoTree]
   await sortHashTreeFiles(result)
 
 
-### Pseudo-module-boundary: math section
-proc getMersenneFloat(m: var MersenneTwister): float =
-  result = float(getNum(m))/float(high(uint32))*TAU
+### Pseudo-module-boundary: math
+proc getMersenneFloat(m: var auto): auto =
+  float(getNum(m))/float(high(uint32))*TAU
 
-proc isClose(a: float, b: float): bool =
+proc isClose(a: auto, b: auto): auto =
   # https://docs.scipy.org/doc/numpy/reference/generated/numpy.isclose.html
   const rtol = 1e-05
   const atol = 1e-08
   result = abs(a - b) <= (atol + rtol * abs(b))
 
-proc genUnitSpherePoint(seed: uint32): FloatVec =
+proc genUnitSpherePoint(seed: auto): auto =
   var mt = newMersenneTwister(seed)
 
   # RWS-Diff authors suggest $10 <= d <= 20$.
-  const dims = 40
+  const dims = 30
 
   let angles = newSeqWith(dims, getMersenneFloat(mt))
 
   # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates
   let firstRectCoord = cos(angles[0])
   let middle = map(toSeq(0..len(angles)-2),
-                   proc(idx: int): float =
-                     result = foldl(angles[0..idx],
-                                    a * sin(b), 1.0) * cos(angles[idx+1]))
+                   proc(idx: int): auto =
+                     foldl(angles[0..idx],
+                           a * sin(b), 1.0) * cos(angles[idx+1]))
   let lastRectCoord = foldl(angles, a*sin(b), 1.0)
   result = concat(@[firstRectCoord], middle, @[lastRectCoord])
 
   # Is this point actually on the unit $n$-sphere?
   doAssert isClose(foldl(result, a + b*b, 0.0), 1.0)
 
-proc addVectors(a: FloatVec, b: FloatVec): FloatVec =
+proc addVectors(a: auto, b: auto): auto =
   doAssert len(a) == len(b)
   result = newSeq[float](len(a))
   for i in toSeq(0..len(a)-1):
     result[i] = a[i] + b[i]
 
-proc distSqVectors(a: FloatVec, b: FloatVec): float =
+proc distSqVectors(a: auto, b: auto): auto =
   doAssert len(a) == len(b)
   result = 0.0
   for i in toSeq(0..len(a)-1):
@@ -167,46 +159,45 @@ proc distSqVectors(a: FloatVec, b: FloatVec): float =
 # TODO: add more test cases, for this and other math routines
 doAssert addVectors(@[1.0,2,3],@[4.0,6,8]) == @[5.0, 8.0, 11.0]
 
+proc whitenSeed(input: auto): auto =
+  foldl(toMD5(input)[0..3], a*256+b, 0'u32)
+
 ### Pseudo-module-boundary: RWS-Diff specific pq-grams
-proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
-               prefix: string): (FloatVec, PQGramMap) =
+proc pqgramDfs(dirtree: auto, q: auto, ancestors: seq[string],
+               prefix: auto): (FloatVec, PQGramMap) =
   # Slide over hash-sorted files at this node, $q$ at a time.
   let (dirs, files) = dirtree[prefix]
   let numFiles = len(files)
   let paddingLen = max(q - numFiles, 0)
   let paddedFiles = concat(files, newSeqWith(paddingLen,
-                                              ("dummy", pathSep)))
+                                             ("dummy", pathSep)))
 
   # FIXME: wrap around by $q-1$ siblings, and also use non-leaves in
   # pq-grams.
   # While it calculates on a file basis, it's all for the directory.
   let pqgrams = map(toSeq(0..numFiles + paddingLen - q),
-                    proc(idx: int): FloatVec =
+                    proc(idx: int): auto =
                       let window = paddedFiles[idx..idx+q-1]
                       doAssert len(window) == q
 
-                      # TODO: Use this MD5 => u32 construction twice. refactor.
-                      let pqgramHash = foldl(toMD5(foldl(ancestors, a & b) &
-                                                   foldl(window, a & b[0],
-                                                         ""))[0..3],
-                                             a*256+b, 0'u32)
+                      let pqgramHash = whitenSeed(foldl(ancestors, a & b) &
+                                                  foldl(window, a & b[0], ""))
                       result = genUnitSpherePoint(pqgramHash))
 
   # FIXME: Shouldn't specify dimensions except in one place.
-  var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(41, 0.0))
+  var sums = foldl(pqgrams, addVectors(a, b), newSeqWith(31, 0.0))
   var allSubTrees = initSet[(string, FloatVec, int)]()
 
   let foo = map(dirs,
-                #proc(nextDir: string): (FloatVec, PQGramMap) =
-                proc(nextDir: string): FloatVec =
-                  result = pqgramDfs(dirtree, q,
-                                     concat(ancestors[1..^1], @[nextDir]),
-                                     #prefix & nextDir & pathSep))
-                                     prefix & nextDir & pathSep)[0])
+                proc(nextDir: string): auto =
+                  pqgramDfs(dirtree, q,
+                            concat(ancestors[1 .. ^1], @[nextDir]),
+                            #prefix & nextDir & pathSep))
+                            prefix & nextDir & pathSep)[0])
 
   for nextDir in dirs:
     let (dir, rest) = pqgramDfs(dirtree, q,
-                                concat(ancestors[1..^1], @[nextDir]),
+                                concat(ancestors[1 .. ^1], @[nextDir]),
                                 prefix & nextDir & pathSep)
 
     # Record each subtree's information both separately and merged.
@@ -223,21 +214,19 @@ proc pqgramDfs(dirtree: FileInfoTree, q: int, ancestors: seq[string],
   for file in files:
     let (fileHash, fileName) = file
     incl(allSubTrees, (prefix & fileName,
-                       genUnitSpherePoint(foldl(toMD5(fileHash)[0..3],
-                                                a*256+b, 0'u32)),
-                       1))
+                       genUnitSpherePoint(whitenSeed(fileHash)), 1))
 
   incl(allSubTrees, (prefix, sums, len(allSubtrees)))
 
   result = (sums, allSubTrees)
 
-proc createPQGrams(hashes: FileInfoBundleSet, p: int = 1,
-                   q: int = 3): Future[PQGramMap] {.async.} =
+proc createPQGrams(hashes: auto, p: auto = 1, q: auto = 3): Future[PQGramMap]
+                  {.async.} =
   # RWS-Diff matches overlapping ancestor/children so thus facilitate
   # finding such pairs directly. This involves a few new assumptions,
   # such as paths having '/'-delineated structure and the distinction
-  # between directories and files; there are $p$ directories, and $q$ siblings,
-  # per pq-gram).
+  # between directories and files; there are $p$ directories, and $q$
+  # siblings, per pq-gram).
 
   # The number of ancesters (directories) per pq-gram
   doAssert p >= 1
@@ -252,16 +241,19 @@ proc createPQGrams(hashes: FileInfoBundleSet, p: int = 1,
 
   result = allSubTrees
 
+proc isDirectory(path: auto): auto =
+  endsWith(path, pathSep)
+
 proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
                    TableRef[string, string] =
   # In smaller cases, more exact O((# dirs)^2) brute-force algorithm. Can
   # use acceleration structures such as k-d trees to obtain O(n log n) at
   # a cost of approximating results; O(# dirs) per dir, or O(log(# dirs))
   # per dir.
-  let initialSubtrees = toSeq(items(initialState))
+  let initSubtrees = toSeq(items(initialState))
 
   # Ensure there is a closest-related-subtree.
-  doAssert len(initialSubtrees) >= 1
+  doAssert len(initSubtrees) >= 1
 
   # Multiple files (or multiple directories) might have similar pq-grams;
   # prefer similar filenames. (Almost) always match files with files, and
@@ -269,33 +261,23 @@ proc mapDestPQGrams(initialState: PQGramMap, goalState: PQGramMap) :
   result = newTable[string, string]()
   for goalSubtree in items(goalState):
     # By setting up this way, cmp compares with correct precedence.
-    # TODO: pull out isDirectory as utility function.
-    let dists = sorted(map(initialSubtrees,
-                           proc(initialSubtree: tuple[a: string, b: FloatVec, c: int]):
-                                tuple[a: int, b: float, c: int, d: string, e: int] =
-                             # TODO: for all these -- can just return expression?
-                             result = (abs(int(endsWith(goalSubtree[0],
-                                                        pathSep)) -
-                                           int(endsWith(initialSubtree[0],
-                                                        pathSep))),
-                                       distSqVectors(goalSubtree[1],
-                                                     initialSubtree[1]),
-                                       editDistance(initialSubtree[0],
-                                                    goalSubtree[0]),
-                                       initialSubtree[0],
-                                       initialSubtree[2])),
+    # TODO: switch dir/file matching to hard constraint; correctness & efficiency
+    let dists = sorted(map(initSubtrees,
+                           proc(initSubtree: auto): auto =
+                             (abs(int(isDirectory(goalSubtree[0])) -
+                                  int(isDirectory(initSubtree[0]))),
+                              distSqVectors(goalSubtree[1], initSubtree[1]),
+                              editDistance(initSubtree[0], goalSubtree[0]),
+                              initSubtree[0],
+                              initSubtree[2])),
                        cmp)[0]
 
     # Files must match exactly, while directories can match approximately.
     # Scale allowed distance with potential distance.
-    if ((not goalSubTree[0].endswith(pathSep) and isClose(dists[1], 0.0)) or
-        (goalSubTree[0].endswith(pathSep) and
-         float(dists[1])/(float(dists[4]+goalSubtree[2])) < 0.2)):
+    if (not isDirectory(goalSubTree[0]) and isClose(dists[1], 0.0)) or
+       (isDirectory(goalSubTree[0]) and
+        float(dists[1])/(float(dists[4]+goalSubtree[2])) < 0.2):
       result[goalSubTree[0]] = dists[3]
-
-# FIXME: this is a general utility function and belongs elsewhere
-proc reverseCmp[T](x, y: T): int =
-  result = cmp(x, y) * -1
 
 ## Substantial section
 # TODO: for testing, pair operations w/ actual tree-building and encapsulate
@@ -314,18 +296,24 @@ proc generateRename(): void =
 proc generateDeleteLeaf(): void =
   discard
 
-# TODO: extract extract-n'th-element
+proc generateDeletions(initialState: PQGramMap,
+                       pqgramMap: TableRef[string, string]): void =
+  # Sufficient approximation of post-order traversal.
+  let mappedInitSubtrees = toSet(toSeq(values(pqGramMap)))
+  for initSubtree in sorted(map(toSeq(items(initialState)),
+                                proc(x: auto): auto = x[0]),
+                            proc(x, y: auto): auto = -1*cmp(x, y)):
+    if initSubtree notin mappedInitSubtrees:
+        echo "deleteLeaf(\"" & initSubtree & "\")"
+
 proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
-                        pqgramMap: TableRef[string, string]): void =
+                        pqgramMap: TableRef[string, string]): auto =
   # Pre-order traversal to check parents before children,
   # but true pre-order depth-first search isn't necessary.
-  # echo pqgramMap
-
   var usedPrefixes = initSet[string]()
 
   for goalSubtree in sorted(map(toSeq(items(goalState)),
-                                proc(x: tuple[a: string, b: FloatVec, c: int]):
-                                     string = x[0]),
+                                proc(x: auto): auto = x[0]),
                             cmp):
     if goalSubtree notin pqgramMap:
         let destParent = "parent(\"" & goalSubtree & "\")"
@@ -345,28 +333,22 @@ proc generateEditScript(initialState: PQGramMap, goalState: PQGramMap,
 
       incl(usedPrefixes, goalSubtree)
 
-  # Sufficient approximation of post-order traversal.
-  # FIXME: Separate enough to be a separate proc (generateDeletions),
-  # depening on avoiding further data-structure coupling.
-  let mappedInitSubtrees = toSet(toSeq(values(pqGramMap)))
-  for initSubtree in sorted(map(toSeq(items(initialState)),
-                                proc(x: tuple[a: string, b: FloatVec, c: int]): string =
-                                  result = x[0]),
-                            reverseCmp):
-    if initSubtree notin mappedInitSubtrees:
-        echo "deleteLeaf(\"" & initSubtree & "\")"
+  generateDeletions(initialState, pqgramMap)
 
-### Pseudo-module-boundary: overall driver
-proc main(): Future[void] {.async.} =
-  doAssert paramCount() >= 2
-  # TODO: pull out for testability not depending on paramStr, etc,
-  # so getFilteredHashes should take strings, read from files elsewhere.
-  let (hashes0Filtered, hashes1Filtered) = getFilteredHashes(paramStr(1),
-                                                             paramStr(2))
+proc compareHashes(hashes0: auto, hashes1: auto): Future[void] {.async.} =
+  let (hashes0Filtered, hashes1Filtered) = getFilteredHashes(hashes0, hashes1)
   let initialState = await createPQGrams(hashes0Filtered)
   let goalState = await createPQGrams(hashes1Filtered)
 
   generateEditScript(initialState, goalState,
                      mapDestPQGrams(initialState, goalState))
+
+
+### Pseudo-module-boundary: overall driver
+proc main(): Future[void] {.async.} =
+  doAssert paramCount() >= 2
+  let hashes0 = await readHashes(paramStr(1))
+  let hashes1 = await readHashes(paramStr(2))
+  await compareHashes(hashes0, hashes1)
 
 waitFor main()
